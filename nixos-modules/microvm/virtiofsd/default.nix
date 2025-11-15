@@ -25,6 +25,7 @@ in
                 virtiofsdCount = 1 + builtins.length virtiofsShares;
               }
             );
+            buffer_size = (builtins.length virtiofsShares + 1) * 3;
             events = "PROCESS_STATE";
           };
         } // builtins.listToAttrs (
