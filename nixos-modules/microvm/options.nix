@@ -64,6 +64,16 @@ in
       type = types.lines;
     };
 
+    extraArgsScript = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = ''
+        A script to provide additional arguments for the hypervisor at runtime.
+
+        The script must output a single line with arguments for the hypervisor.
+      '';
+    };
+
     socket = mkOption {
       description = "Hypervisor control socket path";
       default = "${hostName}.sock";
@@ -286,6 +296,17 @@ in
             default = "ext4";
             description = "Filesystem for automatic creation and mounting";
           };
+          imageType = mkOption {
+            type = types.enum [ "raw" "qcow2" "vhd" "vhdx" ];
+            default = "raw";
+            description = ''
+              Format of the image (only passed to the hypervisor, does not change format of the image created if `autoCreate` is true).
+
+              ::: {.note}
+              Only supported with cloud-hypervisor.
+              :::
+            '';
+          };
         };
       });
     };
@@ -330,6 +351,19 @@ in
             type = str;
             description = ''
               MAC address of the guest's network interface
+            '';
+          };
+          tap.vhost = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Enable vhost-net for TAP interfaces.
+
+              When enabled, packet processing is offloaded to the kernel's
+              vhost-net module instead of QEMU userspace, significantly
+              improving network throughput (~10 Gbps vs ~1.5 Gbps).
+
+              Requires the vhost_net kernel module on the host.
             '';
           };
         };
@@ -411,12 +445,28 @@ in
               Identification of the device on its bus
             '';
           };
-          qemu.deviceExtraArgs = mkOption {
-            type =  with types; nullOr str;
-            default = null;
-            description = ''
-              Device additional arguments (optional)
-            '';
+          qemu = {
+            id = mkOption {
+              type = nullOr str;
+              default = null;
+              description = ''
+                QEMU device identifier (optional)
+              '';
+            };
+            bus = mkOption {
+              type = nullOr str;
+              default = null;
+              description = ''
+                QEMU bus to which this device is attached (optional)
+              '';
+            };
+            deviceExtraArgs = mkOption {
+              type =  nullOr str;
+              default = null;
+              description = ''
+                Device additional arguments (optional)
+              '';
+            };
           };
         };
       });
@@ -475,30 +525,30 @@ in
       '';
     };
 
-     graphics = {
-       enable = mkOption {
-         type = types.bool;
-         default = false;
-         description = ''
-           Enable GUI support.
+    graphics = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable GUI support.
 
-           MicroVMs with graphics are intended for the interactive
-           use-case. They cannot be started through systemd jobs.
+          MicroVMs with graphics are intended for the interactive
+          use-case. They cannot be started through systemd jobs.
 
-           The display backend is chosen by `microvm.graphics.backend`.
-         '';
-       };
+          The display backend is chosen by `microvm.graphics.backend`.
+        '';
+      };
 
-       backend = mkOption {
-         type = types.enum [ "gtk" "cocoa" ];
-         default = if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk";
-         defaultText = lib.literalExpression ''if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk"'';
-         description = ''
-           QEMU display backend to use when `graphics.enable` is true.
+      backend = mkOption {
+        type = types.enum [ "gtk" "cocoa" ];
+        default = if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk";
+        defaultText = lib.literalExpression ''if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk"'';
+        description = ''
+          QEMU display backend to use when `graphics.enable` is true.
 
-           Defaults to `cocoa` on Darwin hosts and `gtk` otherwise.
-         '';
-       };
+          Defaults to `cocoa` on Darwin hosts and `gtk` otherwise.
+        '';
+      };
 
       socket = mkOption {
         type = types.str;
@@ -512,7 +562,7 @@ in
     vmHostPackages = mkOption {
       description = "If set, overrides the default host package.";
       example = "nixpkgs.legacyPackages.aarch64-darwin.pkgs";
-      type = types.nullOr types.pkgs;
+      type = types.pkgs;
       default = if cfg.cpu == null then pkgs else pkgs.buildPackages;
       defaultText = lib.literalExpression "if config.microvm.cpu == null then pkgs else pkgs.buildPackages";
     };
@@ -549,6 +599,90 @@ in
       '';
     };
 
+    qemu.pcieRootPorts = mkOption {
+      description = ''
+        A list of PCIe root ports that can be used for hot-plugging PCIe devices.
+        This is particularly useful on the Q35 machine type, which does not support
+        hot-plugging on the base PCIe root bus (pcie.0). Creating root ports allows
+        attaching and detaching PCIe devices at runtime and can also be useful for
+        devices that require their own dedicated PCIe slot with a fixed address, etc.
+        For additional details see the QEMU PCI Express Guidelines:
+        <https://gitlab.com/qemu-project/qemu/-/blob/master/docs/pcie.txt>
+      '';
+      default = [];
+      example = literalExpression /* nix */ ''
+        [ {
+          bus = "pcie.0";
+          id = "pci_port_0";
+          chassis = 0;
+        } ]
+      '';
+      type = with types; listOf (submodule {
+        options = {
+          id = mkOption {
+            type = str;
+            description = ''
+              A unique identifier for this PCIe root port.
+            '';
+          };
+          bus = mkOption {
+            type = nullOr str;
+            default = null;
+            description = ''
+              The PCIe bus on which the root port will be created.
+            '';
+          };
+          chassis = mkOption {
+            type = nullOr int;
+            default = null;
+            description = ''
+              The chassis number associated with this PCIe root port.
+            '';
+          };
+          slot = mkOption {
+            type = nullOr str;
+            default = null;
+            description = ''
+              PCIe slot number.
+            '';
+          };
+          addr = mkOption {
+            type = nullOr str;
+            default = null;
+            description = ''
+              PCIe address on the parent bus.
+            '';
+          };
+        };
+      });
+    };
+
+    qemu.package = mkOption {
+      description = "The QEMU package to use.";
+      type = types.package;
+      default = if cfg.cpu == null && cfg.vmHostPackages.stdenv.hostPlatform.isLinux then
+        # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
+        cfg.vmHostPackages.qemu_kvm
+      else
+        # Different CPU architectures like darwin or Non-Linux use the generic qemu package
+        cfg.vmHostPackages.qemu;
+      defaultText = lib.literalExpression ''
+        if config.microvm.cpu == null && config.microvm.vmHostPackages.stdenv.hostPlatform.isLinux then
+          # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
+          config.microvm.vmHostPackages.qemu_kvm
+        else
+          # Different CPU architectures like darwin or Non-Linux use the generic qemu package
+          config.microvm.vmHostPackages.qemu
+      '';
+    };
+
+    alioth.package = mkOption {
+      description = "The alioth package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.alioth;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.alioth";
+    };
+
     cloud-hypervisor.platformOEMStrings = mkOption {
       type = with types; listOf str;
       default = [];
@@ -572,6 +706,21 @@ in
       description = "Extra arguments to pass to cloud-hypervisor.";
     };
 
+    cloud-hypervisor.package = mkOption {
+      description = "The cloud-hypervisor package to use.";
+      type = types.package;
+      default = if cfg.graphics.enable then
+        cfg.vmHostPackages.cloud-hypervisor-graphics
+      else
+        cfg.vmHostPackages.cloud-hypervisor;
+      defaultText = lib.literalExpression ''
+        if config.microvm.graphics.enable then
+          config.microvm.vmHostPackages.cloud-hypervisor-graphics
+        else
+          config.microvm.vmHostPackages.cloud-hypervisor
+      '';
+    };
+
     crosvm.extraArgs = mkOption {
       type = with types; listOf str;
       default = [];
@@ -584,10 +733,126 @@ in
       description = "A Hypervisor's sandbox directory";
     };
 
+    crosvm.package = mkOption {
+      description = "The crosvm package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.crosvm;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.crosvm";
+    };
+
     firecracker.cpu = mkOption {
       type = with types; nullOr attrs;
       default = null;
       description = "Custom CPU template passed to firecracker.";
+    };
+
+    firecracker.driveIoEngine = mkOption {
+      type = types.enum [ "Async" "Sync" ];
+      default = "Async";
+      description = "Type of IO engine to use for Firecracker drives (disks).";
+    };
+
+    firecracker.extraArgs = mkOption {
+      type = with types; listOf str;
+      default = [];
+      description = "Extra arguments to pass to firecracker.";
+    };
+
+    firecracker.extraConfig = mkOption {
+      type = types.submodule {
+        freeformType =
+          # vendored (pkgs.formats.json {}).type to avoid pkgs dependency and eval failure in search's
+          with types;
+          let
+            baseType = oneOf [
+              bool
+              int
+              float
+              str
+              path
+              (attrsOf valueType)
+              (listOf valueType)
+            ];
+            valueType = nullOr baseType // {
+              description = "JSON value";
+            };
+          in
+          valueType;
+      };
+      default = {};
+      description = "Extra config to merge into Firecracker JSON configuration";
+    };
+
+    firecracker.package = mkOption {
+      description = "The firecracker package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.firecracker;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.firecracker";
+    };
+
+    kvmtool.package = mkOption {
+      description = "The kvmtool package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.kvmtool;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.kvmtool";
+    };
+
+    stratovirt.package = mkOption {
+      description = "The stratovirt package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.stratovirt;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.stratovirt";
+    };
+
+    vfkit.extraArgs = mkOption {
+      type = with types; listOf str;
+      default = [];
+      description = "Extra arguments to pass to vfkit.";
+    };
+
+    vfkit.logLevel = mkOption {
+      type = with types; nullOr (enum ["debug" "info" "error"]);
+      default = "info";
+      description = "vfkit log level.";
+    };
+
+    vfkit.package = mkOption {
+      description = "The vfkit package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.vfkit;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.vfkit";
+    };
+
+    vfkit.rosetta = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable Rosetta support for running x86_64 binaries in ARM64 Linux VMs.
+          Only works on Apple Silicon (ARM) Macs.
+
+          When enabled, the Rosetta virtiofs share will be automatically mounted
+          and binfmt will be configured to use Rosetta for x86_64 binaries.
+        '';
+      };
+
+      install = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Automatically install Rosetta if missing.
+          If false and Rosetta is not installed, vfkit will fail to start.
+        '';
+      };
+
+      ignoreIfMissing = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Continue execution even if Rosetta installation fails or is unavailable.
+          Useful for configurations that should work on both ARM and Intel Macs.
+        '';
+      };
     };
 
     prettyProcnames = mkOption {
@@ -637,6 +902,13 @@ in
       description = ''
         Extra command-line switch to pass to virtiofsd.
       '';
+    };
+
+    virtiofsd.package = mkOption {
+      description = "The virtiofsd package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.virtiofsd;
+      defaultText = literalExpression ''config.microvm.vmHostPackages.virtiofsd'';
     };
 
     runner = mkOption {

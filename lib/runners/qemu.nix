@@ -19,42 +19,26 @@ let
     ]);
   });
 
-  minimizeQemuClosureSize = pkg: (pkg.override (oa: {
+  minimizeQemuClosureSize = pkg: pkg.override (oa: {
     # standin for disabling everything guilike by hand
     nixosTestRunner =
       if graphics.enable
       then oa.nixosTestRunner or false
       else true;
-    enableDocs = false;
-  })).overrideAttrs (oa: {
-    postFixup = ''
-      ${oa.postFixup or ""}
-      # This particular firmware causes 192mb of closure size
-      ${lib.optionalString (system != "aarch64-linux") "rm -rf $out/share/qemu/edk2-arm-*"}
-    '';
   });
 
   overrideQemu = x: lib.pipe x (
     lib.optional requireUsb enableLibusb
     ++ lib.optional microvmConfig.optimize.enable minimizeQemuClosureSize
   );
-  qemuPkg =
-    if microvmConfig.cpu == null && vmHostPackages.stdenv.hostPlatform.isLinux
-    then
-      # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
-      vmHostPackages.qemu_kvm
-    else
-      # Different CPU architectures like darwin or Non-Linux use the generic qemu package
-      vmHostPackages.qemu;
-
-  qemu = overrideQemu qemuPkg;
+  qemu = overrideQemu microvmConfig.qemu.package;
 
   aioEngine = if vmHostPackages.stdenv.hostPlatform.isLinux
     then "io_uring"
     else "threads";
 
   inherit (microvmConfig) hostName vcpu mem balloon initialBalloonMem deflateOnOOM hotplugMem hotpluggedMem user interfaces shares socket forwardPorts devices vsock graphics storeOnDisk kernel initrdPath storeDisk credentialFiles;
-  inherit (microvmConfig.qemu) machine extraArgs serialConsole;
+  inherit (microvmConfig.qemu) machine extraArgs serialConsole pcieRootPorts;
 
 
   volumes = withDriveLetters microvmConfig;
@@ -102,6 +86,7 @@ let
         pit = "off";
         pic = "off";
         pcie = if requirePci then "on" else "off";
+        rtc = "on";
         usb = if requireUsb then "on" else "off";
       };
       aarch64-linux = {
@@ -198,6 +183,33 @@ lib.warnIf (mem == 2048) ''
       "-chardev" "stdio,id=stdio,signal=off"
       "-device" "virtio-rng-${devType}"
     ] ++
+      # Create PCIe root ports before vfio-pci devices that might require them
+      builtins.concatMap ({ id, bus, chassis, slot, addr, ... }:
+        [ "-device" "pcie-root-port,id=${id}${
+            lib.optionalString (bus != null) ",bus=${bus}" +
+            lib.optionalString (chassis != null) ",chassis=${toString chassis}" +
+            lib.optionalString (slot != null) ",slot=${slot}" +
+            lib.optionalString (addr != null) ",addr=${addr}"
+          }"
+        ]
+      ) pcieRootPorts
+    )
+    + " " + # Move vfio-pci outside of escapeShellArgs
+    lib.concatStringsSep " " (lib.concatMap ({ bus, path, qemu,... }: {
+      pci = [
+        "-device" "vfio-pci,host=${path},multifunction=on${
+          lib.optionalString (qemu.id != null) ",id=${qemu.id}" +
+          lib.optionalString (qemu.bus != null) ",bus=${qemu.bus}" +
+          # Allow to pass additional arguments to pci device
+          lib.optionalString (qemu.deviceExtraArgs != null) ",${qemu.deviceExtraArgs}"
+        }"
+      ];
+      usb = [
+        "-device" "usb-host,${path}"
+      ];
+    }.${bus}) devices)
+    + " " +
+    lib.escapeShellArgs(
     builtins.concatMap (fwCfgOption: ["-fw_cfg" fwCfgOption]) fwCfgOptions ++
     lib.optionals serialConsole [
       "-serial" "chardev:stdio"
@@ -241,7 +253,7 @@ lib.warnIf (mem == 2048) ''
     lib.optionals (user != null) [ "-user" user ] ++
     lib.optionals (socket != null) [ "-qmp" "unix:${socket},server,nowait" ] ++
     lib.optionals balloon [
-	 "-device" ("virtio-balloon,free-page-reporting=on,id=balloon0" + lib.optionalString (deflateOnOOM) ",deflate-on-oom=on")
+	    "-device" ("virtio-balloon,free-page-reporting=on,id=balloon0" + lib.optionalString (deflateOnOOM) ",deflate-on-oom=on")
     ] ++
     builtins.concatMap ({ image, letter, serial, direct, readOnly, ... }:
       [ "-drive"
@@ -275,7 +287,7 @@ lib.warnIf (mem == 2048) ''
       forwardPorts != [] &&
       ! builtins.any ({ type, ... }: type == "user") interfaces
     ) "${hostName}: forwardPortsOptions only running with user network" (
-      builtins.concatMap ({ type, id, mac, bridge, ... }: [
+      builtins.concatMap ({ type, id, mac, bridge, tap ? {}, ... }: [
         "-netdev" (
           lib.concatStringsSep "," (
             [
@@ -291,6 +303,9 @@ lib.warnIf (mem == 2048) ''
             ++ lib.optionals (type == "tap") [
               "ifname=${id}"
               "script=no" "downscript=no"
+            ]
+            ++ lib.optionals (type == "tap" && tap.vhost or false) [
+              "vhost=on"
             ]
             ++ lib.optionals (type == "macvtap") [ (
               let
@@ -328,19 +343,7 @@ lib.warnIf (mem == 2048) ''
     ]
     ++
     extraArgs
-  )
-  + " " + # Move vfio-pci outside of
-  lib.concatStringsSep " " (lib.concatMap ({ bus, path, qemu,... }: {
-    pci = [
-      "-device" "vfio-pci,host=${path},multifunction=on${
-        # Allow to pass additional arguments to pci device
-        lib.optionalString (qemu.deviceExtraArgs != null) ",${qemu.deviceExtraArgs}"
-      }"
-    ];
-    usb = [
-      "-device" "usb-host,${path}"
-    ];
-  }.${bus}) devices);
+  );
 
   canShutdown = socket != null;
 

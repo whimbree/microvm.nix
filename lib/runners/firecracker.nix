@@ -11,7 +11,7 @@ let
     vcpu mem balloon initialBalloonMem hotplugMem hotpluggedMem
     interfaces volumes shares devices
     kernel initrdPath
-    storeDisk credentialFiles;
+    storeDisk credentialFiles vsock;
   inherit (microvmConfig.firecracker) cpu;
 
   kernelPath = {
@@ -20,11 +20,11 @@ let
   }.${system};
 
   # Firecracker config, as JSON in `configFile`
-  config = {
+  baseConfig = {
     boot-source = {
       kernel_image_path = kernelPath;
       initrd_path = initrdPath;
-      boot_args = "console=ttyS0 noapic acpi=off reboot=k panic=1 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd ${toString microvmConfig.kernelParams}";
+      boot_args = "console=ttyS0,115200 noapic acpi=off reboot=k panic=1 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd ${toString microvmConfig.kernelParams}";
     };
     machine-config = {
       vcpu_count = vcpu;
@@ -38,7 +38,7 @@ let
       path_on_host = storeDisk;
       is_root_device = false;
       is_read_only = true;
-      io_engine = "Async";
+      io_engine = microvmConfig.firecracker.driveIoEngine;
     } ] ++ map ({ image, serial, direct, readOnly, ... }:
       lib.warnIf (serial != null) ''
         Volume serial is not supported for firecracker
@@ -50,7 +50,7 @@ let
         path_on_host = image;
         is_root_device = false;
         is_read_only = readOnly;
-        io_engine = "Async";
+        io_engine = microvmConfig.firecracker.driveIoEngine;
       }) volumes;
     network-interfaces = map ({ type, id, mac, ... }:
       if type == "tap"
@@ -61,12 +61,23 @@ let
       }
       else throw "Network interface type ${type} not implemented for Firecracker"
     ) interfaces;
-    vsock = null;
-  } // lib.optionalAttrs (cpu != null) {
+    vsock =
+      if vsock.cid != null then
+        {
+          guest_cid = vsock.cid;
+          uds_path = "notify.vsock";
+        }
+      else
+        null;
+  }
+  // lib.optionalAttrs (cpu != null) {
     cpu-config = pkgs.writeText "cpu-config.json" (builtins.toJSON cpu);
   };
+  config = lib.recursiveUpdate baseConfig microvmConfig.firecracker.extraConfig;
 
   configFile = pkgs.writers.writeJSON "firecracker-${hostName}.json" config;
+
+  firecrackerPkg = microvmConfig.firecracker.package;
 
 in {
   command =
@@ -86,15 +97,17 @@ in {
     then throw "hotpluggedMem not implemented for Firecracker"
     else if credentialFiles != {}
     then throw "credentialFiles are not implemented for Firecracker"
-    else lib.escapeShellArgs [
-      "${pkgs.firecracker}/bin/firecracker"
+    else lib.escapeShellArgs ([
+      "${firecrackerPkg}/bin/firecracker"
       "--config-file" configFile
       "--api-sock" (
         if socket != null
         then socket
         else throw "Firecracker must be configured with an API socket (option microvm.socket)!"
       )
-    ];
+    ]
+    ++ lib.optional (lib.versionAtLeast firecrackerPkg.version "1.13.0") "--enable-pci"
+    ++ microvmConfig.firecracker.extraArgs);
 
   preStart = ''
     ${preStart}
@@ -102,6 +115,9 @@ in {
     if [ -e '${socket}' ]; then
       mv '${socket}' '${socket}.old'
     fi
+  ''
+  + lib.optionalString (vsock.cid != null) ''
+    rm -f notify.vsock notify.vsock_*
   '';
 
   canShutdown = socket != null;

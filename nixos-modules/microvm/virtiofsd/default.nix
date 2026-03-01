@@ -5,7 +5,7 @@ let
     proto == "virtiofs"
   ) config.microvm.shares;
 
-  requiresVirtiofsd = virtiofsShares != [];
+  requiresVirtiofsd = virtiofsShares != [] && config.microvm.hypervisor != "vfkit";
 
   inherit (pkgs.python3Packages) supervisor;
   supervisord = lib.getExe' supervisor "supervisord";
@@ -34,14 +34,13 @@ in
             value = {
               stderr_syslog = true;
               stdout_syslog = true;
-              autorestart = true;
               command = pkgs.writeShellScript "virtiofsd-${tag}" ''
                 if [ $(id -u) = 0 ]; then
                   OPT_RLIMIT="--rlimit-nofile 1048576"
                 else
                   OPT_RLIMIT=""
                 fi
-                exec ${lib.getExe pkgs.virtiofsd} \
+                exec ${lib.getExe config.microvm.virtiofsd.package} \
                   --socket-path=${lib.escapeShellArg socket} \
                   ${lib.optionalString (config.microvm.virtiofsd.group != null)
                   "--socket-group=${config.microvm.virtiofsd.group}"
@@ -71,9 +70,5 @@ in
       in ''
         exec ${supervisord} --configuration ${supervisordConfigFile}
       '';
-
-    virtiofsd-shutdown = ''
-      exec ${supervisorctl} stop
-    '';
   };
 }

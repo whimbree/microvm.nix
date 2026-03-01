@@ -22,12 +22,17 @@ in
       }
     ]) (builtins.attrNames config.microvm.vms);
 
-    boot.kernelModules = [ "tun" ];
+    boot.kernelModules = [
+      # For `type = "tap"` interfaces
+      "tap"
+      # For `tap.vhost = true` interfaces
+      "vhost_net"
+    ];
 
     system.activationScripts.microvm-host = ''
       mkdir -p ${stateDir}
       chown ${user}:${group} ${stateDir}
-      chmod g+w ${stateDir}
+      chmod u+rwx,g+w ${stateDir}
     '';
 
     environment.systemPackages = [
@@ -58,7 +63,9 @@ in
         isFlake = flake != null;
         guestConfig = if isFlake
                       then flake.nixosConfigurations.${name}.config
-                      else microvmConfig.config.config;
+                      else if microvmConfig.evaluatedConfig != null
+                        then microvmConfig.evaluatedConfig.config
+                        else microvmConfig.config.config;
         runner = guestConfig.microvm.declaredRunner;
       in
     {
@@ -67,8 +74,10 @@ in
         before = [
           "microvm@${name}.service"
           "microvm-tap-interfaces@${name}.service"
+          "microvm-macvtap-interfaces@${name}.service"
           "microvm-pci-devices@${name}.service"
           "microvm-virtiofsd@${name}.service"
+          "microvm-set-booted@${name}.service"
         ];
         partOf = [ "microvm@${name}.service" ];
         wantedBy = [ "microvms.target" ];
@@ -132,7 +141,7 @@ in
         description = "Setup MicroVM '%i' TAP interfaces";
         before = [ "microvm@%i.service" ];
         partOf = [ "microvm@%i.service" ];
-        after = [ "network.target" ];
+        after = [ "network.target" "microvm-set-booted@%i.service" ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/tap-up";
         restartIfChanged = false;
         serviceConfig = {
@@ -147,6 +156,7 @@ in
       "microvm-macvtap-interfaces@" = {
         description = "Setup MicroVM '%i' MACVTAP interfaces";
         before = [ "microvm@%i.service" ];
+        after = [ "microvm-set-booted@%i.service" ];
         partOf = [ "microvm@%i.service" ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/macvtap-up";
         restartIfChanged = false;
@@ -174,31 +184,16 @@ in
         };
       };
 
-      "microvm-virtiofsd@" =
-        let
-          runFromBootedOrCurrent = pkgs.writeShellScript "microvm-runFromBootedOrCurrent" ''
-            NAME="$1"
-            VM="$2"
-            cd "${stateDir}/$VM"
-
-            if [ -e booted ]; then
-              exec booted/bin/$NAME
-            else
-              exec current/bin/$NAME
-            fi
-          '';
-
-        in {
+      "microvm-virtiofsd@" = {
           description = "VirtioFS daemons for MicroVM '%i'";
           before = [ "microvm@%i.service" ];
-          after = [ "local-fs.target" ];
+          after = [ "local-fs.target" "microvm-set-booted@%i.service" ];
           partOf = [ "microvm@%i.service" ];
           unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/virtiofsd-run";
           restartIfChanged = false;
           serviceConfig = {
             WorkingDirectory = "${stateDir}/%i";
             ExecStart = "${stateDir}/%i/current/bin/virtiofsd-run";
-            ExecStop = "${runFromBootedOrCurrent} virtiofsd-shutdown %i";
             LimitNOFILE = 1048576;
             NotifyAccess = "all";
             PrivateTmp = "yes";
@@ -206,8 +201,29 @@ in
             RestartSec = "5s";
             SyslogIdentifier = "microvm-virtiofsd@%i";
             Type = "notify";
+            KillMode = "mixed";
           };
         };
+
+      "microvm-set-booted@" = {
+        description = "Save MicroVM '%i' booted configuration";
+        before = [ "microvm@%i.service" ];
+        partOf = [ "microvm@%i.service" ];
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          SyslogIdentifier = "microvm-set-booted@%i";
+          WorkingDirectory = "${stateDir}/%i";
+          User = user;
+          Group = group;
+          ExecStop = "${lib.getExe' pkgs.coreutils "rm"} booted";
+        };
+        script = ''
+          rm -f booted
+          ln -s $(readlink current) booted
+        '';
+      };
 
       "microvm@" = {
         description = "MicroVM '%i'";
@@ -216,6 +232,7 @@ in
           "microvm-macvtap-interfaces@%i.service"
           "microvm-pci-devices@%i.service"
           "microvm-virtiofsd@%i.service"
+          "microvm-set-booted@%i.service"
         ];
         after = [
           "network.target"
@@ -223,16 +240,10 @@ in
           "microvm-macvtap-interfaces@%i.service"
           "microvm-pci-devices@%i.service"
           "microvm-virtiofsd@%i.service"
+          "microvm-set-booted@%i.service"
         ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/microvm-run";
         restartIfChanged = false;
-        preStart = ''
-          rm -f booted
-          ln -s $(readlink current) booted
-        '';
-        postStop = ''
-          rm booted
-        '';
         serviceConfig = {
           Type =
             if config.microvm.host.useNotifySockets
