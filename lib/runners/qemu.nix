@@ -37,9 +37,8 @@ let
     then "io_uring"
     else "threads";
 
-  inherit (microvmConfig) hostName vcpu mem balloon initialBalloonMem deflateOnOOM hotplugMem hotpluggedMem user interfaces shares socket forwardPorts devices vsock graphics storeOnDisk kernel initrdPath storeDisk credentialFiles;
+  inherit (microvmConfig) hostName machineId vcpu mem balloon initialBalloonMem deflateOnOOM hotplugMem hotpluggedMem user interfaces shares socket forwardPorts devices vsock graphics storeOnDisk kernel initrdPath storeDisk credentialFiles;
   inherit (microvmConfig.qemu) machine extraArgs serialConsole pcieRootPorts;
-
 
   volumes = withDriveLetters microvmConfig;
 
@@ -128,6 +127,8 @@ let
 
   tapMultiQueue = vcpu > 1;
 
+  useHotPlugMemory = hotplugMem > 0;
+
   forwardingOptions = lib.concatMapStrings ({ proto, from, host, guest }: {
     host = "hostfwd=${proto}:${host.address}:${toString host.port}-" +
            "${guest.address}:${toString guest.port},";
@@ -162,10 +163,6 @@ lib.warnIf (mem == 2048) ''
 
   command = if initialBalloonMem != 0
   then throw "qemu does not support initialBalloonMem"
-  else if hotplugMem != 0
-  then throw "qemu does not support hotplugMem"
-  else if hotpluggedMem != 0
-  then throw "qemu does not support hotpluggedMem"
   else lib.escapeShellArgs (
     [
       "${qemu}/bin/qemu-system-${arch}"
@@ -182,6 +179,8 @@ lib.warnIf (mem == 2048) ''
 
       "-chardev" "stdio,id=stdio,signal=off"
       "-device" "virtio-rng-${devType}"
+    ] ++ lib.optionals (machineId != null) [
+      "-smbios" "type=1,uuid=${machineId}"
     ] ++
       # Create PCIe root ports before vfio-pci devices that might require them
       builtins.concatMap ({ id, bus, chassis, slot, addr, ... }:
@@ -254,6 +253,10 @@ lib.warnIf (mem == 2048) ''
     lib.optionals (socket != null) [ "-qmp" "unix:${socket},server,nowait" ] ++
     lib.optionals balloon [
 	    "-device" ("virtio-balloon,free-page-reporting=on,id=balloon0" + lib.optionalString (deflateOnOOM) ",deflate-on-oom=on")
+    ] ++
+    lib.optionals useHotPlugMemory [
+      "-object" "memory-backend-ram,id=vmem0,size=${toString hotplugMem}M"
+      "-device" "virtio-mem-pci,id=vm0,memdev=vmem0,requested-size=${toString hotpluggedMem}M"
     ] ++
     builtins.concatMap ({ image, letter, serial, direct, readOnly, ... }:
       [ "-drive"
@@ -351,6 +354,11 @@ lib.warnIf (mem == 2048) ''
     if socket != null
     then
       ''
+        # Exit gracefully if QEMU is already gone (e.g., killed by machinectl)
+        if [ ! -S ${socket} ]; then
+          exit 0
+        fi
+
         (
           ${writeQmp { execute = "qmp_capabilities"; }}
           ${writeQmp {

@@ -5,7 +5,7 @@
   <a href="https://microvm-nix.github.io/microvm.nix/">HTML</a>
   <a href="doc/src/SUMMARY.md">Markdown</a>
   •
-  <strong><a href="https://matrix.to/#/#microvm.nix:envs.net">Matrix chat</a></strong>
+  <strong><a href="https://matrix.to/#/#microvm:nixos.org">Matrix chat</a></strong>
   •
   <strong><a href="./CHANGELOG.md">Changelog</a></strong>
 </p>
@@ -52,7 +52,7 @@ imperatively with the provided `microvm` command.
 | [qemu](https://www.qemu.org/)                                           | C        |                                                       |
 | [cloud-hypervisor](https://www.cloudhypervisor.org/)                    | Rust     | no 9p shares                                          |
 | [firecracker](https://firecracker-microvm.github.io/)                   | Rust     | no 9p/virtiofs shares                                 |
-| [crosvm](https://chromium.googlesource.com/chromiumos/platform/crosvm/) | Rust     | 9p shares broken                                      |
+| [crosvm](https://github.com/google/crosvm) | Rust     | 9p shares broken                                      |
 | [kvmtool](https://github.com/kvmtool/kvmtool)                           | C        | no virtiofs shares, no control socket                 |
 | [stratovirt](https://github.com/openeuler-mirror/stratovirt)            | Rust     | no 9p/virtiofs shares, no control socket              |
 | [alioth](https://github.com/google/alioth)                              | Rust     | no virtiofs shares, no control socket                 |
