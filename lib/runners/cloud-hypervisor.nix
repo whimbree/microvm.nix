@@ -66,7 +66,7 @@ let
     ) ops
   );
 
-  # Attrs representing CHV mem options
+  # cloud-hypervisor memory: size and hotplug_size are additive, so total = size + hotplugged_size.
   memOps = opsMapped ({
     size = "${toString mem}M";
     mergeable = "on";
@@ -74,9 +74,8 @@ let
     # prevents Kernel Same-page Merging.
     shared = if useVirtiofs || graphics.enable then "on" else "off";
   }
-  # add ballooning options and override 'size' key
+  # add hotplug memory options
   // lib.optionalAttrs useHotPlugMemory {
-    size = "${toString hotplugMem}M";
     hotplug_method = "virtio-mem";
     hotplug_size = "${toString hotplugMem}M";
     hotplugged_size = "${toString hotpluggedMem}M";
